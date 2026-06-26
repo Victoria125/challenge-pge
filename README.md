@@ -1,18 +1,141 @@
-# Desafio Técnico - Pipeline de Atas de Registro de Preços
+# Pipeline de Atas de Registro de Preços — PGE-CE
 
-Infraestrutura base do pipeline end-to-end. Este estágio sobe apenas os
-serviços para garantir que tudo se comunica antes de escrever a lógica 
-de coleta e processamento.
+Pipeline end-to-end para coleta, processamento e visualização de dados públicos de **Atas de Registro de Preços** do portal Compras.gov.br.
 
-## Serviços
+## Arquitetura
 
-| Serviço          | Porta(s)       | Para quê                                  |
-|------------------|----------------|-------------------------------------------|
-| PostgreSQL       | 5432           | Banco transacional (área de Stage)        |
-| Kafka            | 9092           | Barramento de mensageria                  |
-| Debezium Connect | 8083           | Captura de alterações (CDC) do Postgres   |
-| Redpanda Console | 8080           | UI para inspecionar tópicos do Kafka      |
-| ClickHouse       | 8123 / 9000    | Banco analítico (dimensões e fato)        |
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         FONTE DE DADOS                              │
+│          API Compras.gov.br (/modulo-arp)                           │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  PARTE 1 — RPA + Stage                                              │
+│                                                                     │
+│  coletor Python                                                     │
+│  - requests + retry/backoff                                         │
+│  - paginação automática                                             │
+│  - UPSERT idempotente (IS DISTINCT FROM)                            │
+│                        │                                            │
+│                        ▼                                            │
+│            PostgreSQL (stage.arp_ata, stage.arp_item)               │
+└────────────────────────┬────────────────────────────────────────────┘
+                         │ WAL / CDC
+                         ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  PARTE 2 — Eventos em Tempo Real                                    │
+│                                                                     │
+│  Debezium → Kafka (tópico arp.stage.arp_item)                       │
+│                        │                                            │
+│                        ▼                                            │
+│  Worker Go — pool de goroutines (produtor-consumidor)               │
+│  - 4 goroutines em paralelo                                         │
+│  - higienização de strings                                          │
+│  - insert em lote no ClickHouse                                     │
+│                        │                                            │
+│                        ▼                                            │
+│  ClickHouse (dim_fornecedores, dim_orgaos, dim_itens)               │
+└────────────────────────┬────────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  PARTE 3 — Batch + Orquestração                                     │
+│                                                                     │
+│  Apache Airflow DAG (fato_registro_precos)                          │
+│  validar_fontes → construir_fato → validar_fato                     │
+│                        │                                            │
+│  Job Pandas: lê stage.arp_item, cruza dimensões                     │
+│                        │                                            │
+│                        ▼                                            │
+│  ClickHouse (fato_registro_precos)                                  │
+└────────────────────────┬────────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  PARTE 4 — Dashboard                                                │
+│                                                                     │
+│  Apache Superset conectado ao ClickHouse                            │
+│  - Volume financeiro total homologado                               │
+│  - Top 10 fornecedores por volume                                   │
+│  - Histórico de preços por período                                  │
+│  - Visão por órgãos compradores                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Stack
+
+| Componente | Tecnologia |
+|---|---|
+| Coleta (RPA) | Python 3.12, requests |
+| Banco transacional | PostgreSQL 16 |
+| CDC | Debezium 2.7 + Apache Kafka 7.6 |
+| Worker de eventos | Go 1.22, segmentio/kafka-go, clickhouse-go |
+| Banco analítico | ClickHouse 24.8 |
+| Orquestração | Apache Airflow 2.9 |
+| Processamento batch | Pandas 2.2 |
+| Dashboard | Apache Superset 3.1 |
+
+## DER — Diagrama Entidade-Relacionamento (Stage)
+
+```
+stage.arp_ata
+─────────────────────────────────
+PK numero_controle_pncp_ata TEXT
+   numero_ata_registro_preco TEXT
+   codigo_unidade_gerenciadora TEXT
+   nome_unidade_gerenciadora TEXT
+   objeto TEXT
+   valor_total NUMERIC
+   status_ata TEXT
+   data_assinatura DATE
+   data_vigencia_inicial DATE
+   data_vigencia_final DATE
+   ingested_at TIMESTAMP
+   updated_at TIMESTAMP        ← monitorado pelo Debezium
+        │
+        │ 1:N
+        ▼
+stage.arp_item
+─────────────────────────────────
+PK numero_controle_pncp_ata TEXT ──┐
+PK numero_item TEXT                │ chave composta
+   codigo_item INTEGER             │
+   descricao_item TEXT             │
+   tipo_item TEXT                  │
+   ni_fornecedor TEXT              │
+   nome_razao_social_fornecedor TEXT
+   valor_unitario NUMERIC
+   valor_total NUMERIC
+   quantidade_homologada_item NUMERIC
+   data_vigencia_inicial DATE
+   ingested_at TIMESTAMP
+   updated_at TIMESTAMP        ← monitorado pelo Debezium
+```
+
+## Star Schema (ClickHouse)
+
+```
+              dim_fornecedores
+              ─────────────────
+              ni_fornecedor (PK)
+              nome_razao_social
+              classificacao_fornecedor
+
+dim_orgaos         fato_registro_precos        dim_itens
+──────────    ◄──  ────────────────────  ──►   ─────────
+codigo_unid.       numero_controle_pncp_ata    codigo_item (PK)
+nome_unid.         numero_item                 descricao_item
+                   ni_fornecedor (FK)          tipo_item
+                   codigo_unid_ger. (FK)       codigo_pdm
+                   codigo_item (FK)            nome_pdm
+                   data_vigencia_inicial (FK)
+                   valor_unitario              dim_tempo
+                   valor_total            ──►  ─────────
+                   qtd_homologada              data (PK)
+                                               ano, mes, trimestre
+```
 
 ## Subir o ambiente
 
@@ -20,73 +143,81 @@ de coleta e processamento.
 docker compose up -d
 ```
 
-Aguarde todos os healthchecks ficarem saudáveis:
+Aguarda todos os containers ficarem `healthy` (~2 min):
 
 ```bash
 docker compose ps
 ```
 
-Os scripts em `init-postgres/` e `init-clickhouse/` rodam automaticamente na
-primeira inicialização, criando o schema `stage` no Postgres e as tabelas
-analíticas no ClickHouse.
-
-## Registrar o conector Debezium
-
-Depois que os serviços estiverem de pé (Debezium leva ~30s para aceitar
-conexões), registre o conector que monitora as tabelas de stage:
+## Registrar o conector CDC
 
 ```bash
 curl -X POST http://localhost:8083/connectors \
   -H "Content-Type: application/json" \
-  -d @debezium/arp-connector.json
+  -d @arp-connector.json
 ```
 
-Verifique o status:
+## Executar a coleta (Parte 1)
 
 ```bash
-curl http://localhost:8083/connectors/arp-postgres-connector/status
+docker compose up -d --build coletor
+docker compose logs -f coletor
 ```
 
-## Validar que tudo conversa
-
-PostgreSQL :
+## Disparar a DAG (Parte 3)
 
 ```bash
-docker exec -it arp_postgres psql -U arp -d arp_stage -c "\dt stage.*"
+docker exec arp_airflow_scheduler airflow dags unpause fato_registro_precos
+docker exec arp_airflow_scheduler airflow dags trigger fato_registro_precos
 ```
 
-ClickHouse :
+## Acessar os serviços
 
-```bash
-docker exec -it arp_clickhouse clickhouse-client -u arp --password arp \
-  -q "SHOW TABLES FROM arp_analytics"
+| Serviço | URL | Credenciais |
+|---|---|---|
+| Redpanda Console (Kafka) | http://localhost:8080 | — |
+| Debezium Connect | http://localhost:8083 | — |
+| Airflow | http://localhost:8085 | admin / admin |
+| Superset | http://localhost:8088 | admin / admin |
+| ClickHouse HTTP | http://localhost:8123 | arp / arp |
+| PostgreSQL | localhost:5432 | arp / arp |
+
+## Estrutura do projeto
+
+```
+.
+├── docker-compose.yml
+├── arp-connector.json          # configuração do conector Debezium
+├── init-postgres/
+│   ├── 01_schema.sql           # DDL do stage (arp_ata, arp_item)
+│   └── 02_airflow_db.sql       # banco de metadados do Airflow
+├── init-clickhouse/
+│   └── 01_schema.sql           # DDL das dimensões e fato
+├── coletor/                    # Parte 1 — RPA Python
+│   ├── main.py
+│   ├── api_client.py
+│   ├── transform.py
+│   ├── repository.py
+│   ├── config.py
+│   ├── requirements.txt
+│   └── Dockerfile
+├── worker/                     # Parte 2 — Worker Go
+│   ├── main.go
+│   ├── go.mod
+│   ├── Dockerfile
+│   └── internal/
+│       ├── model/
+│       ├── config/
+│       ├── transform/
+│       ├── clickhouse/
+│       └── kafka/
+└── airflow/                    # Parte 3 — Orquestração
+    ├── Dockerfile
+    ├── requirements.txt
+    └── dags/
+        └── dag_fato_registro_precos.py
 ```
 
-Teste de ponta a ponta do CDC (insere uma linha e confirma no Kafka):
+## Vídeo de demonstração
 
-```bash
-# 1. inserir uma linha de teste no Postgres
-docker exec -it arp_postgres psql -U arp -d arp_stage -c \
-  "INSERT INTO stage.arp_item (numero_controle_pncp_ata, numero_item, descricao_item, valor_total)
-   VALUES ('TESTE-001', '1', 'item de teste', 100.00);"
-
-# 2. abrir o Redpanda Console em http://localhost:8080 e procurar o tópico
-#    arp.stage.arp_item 
-```
-
-## Derrubar tudo
-
-```bash
-docker compose down          
-docker compose down -v       
-```
-
-## Próximas etapas
-
-1. **Parte 1** — robô Python que coleta da API do Compras.gov.br
-   (`/modulo-arp/...`) e popula `stage.arp_ata` e `stage.arp_item` com UPSERT.
-2. **Parte 2** — worker em Go consumindo `arp.stage.arp_item` do Kafka,
-   higienizando e gravando nas dimensões do ClickHouse.
-3. **Parte 3** — DAG do Airflow + job PySpark, Pandas montando
-   `fato_registro_precos`.
-4. **Parte 4** — dashboard Superset sobre o ClickHouse.
+[Em breve]
