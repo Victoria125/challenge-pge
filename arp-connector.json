@@ -1,0 +1,26 @@
+{
+  "name": "arp-postgres-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "arp",
+    "database.password": "arp",
+    "database.dbname": "arp_stage",
+    "topic.prefix": "arp",
+    "schema.include.list": "stage",
+    "table.include.list": "stage.arp_ata,stage.arp_item",
+    "plugin.name": "pgoutput",
+    "slot.name": "arp_debezium_slot",
+    "publication.autocreate.mode": "filtered",
+    "snapshot.mode": "always",
+    "tombstones.on.delete": "false",
+    "decimal.handling.mode": "string",
+    "time.precision.mode": "connect",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false"
+  }
+}

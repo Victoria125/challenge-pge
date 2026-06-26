@@ -1,0 +1,277 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL - banco transacional (area de Stage da Parte 1)
+  # Ja sobe configurado com wal_level=logical para suportar CDC via Debezium.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    container_name: arp_postgres
+    environment:
+      POSTGRES_USER: arp
+      POSTGRES_PASSWORD: arp
+      POSTGRES_DB: arp_stage
+    ports:
+      - "5432:5432"
+    # wal_level=logical e os parametros de replicacao sao o que permite o
+    # Debezium ler o WAL. Sem isso, o CDC nao funciona.
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_wal_senders=10"
+      - "-c"
+      - "max_replication_slots=10"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Scripts DDL executados automaticamente na primeira inicializacao.
+      - ./init-postgres:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arp -d arp_stage"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Kafka (modo KRaft, sem Zookeeper) - barramento de mensageria
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: arp_kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Debezium (Kafka Connect) - captura de alteracoes (CDC) do Postgres
+  # O conector em si e registrado depois que tudo sobe (ver README).
+  # ---------------------------------------------------------------------------
+  debezium:
+    image: debezium/connect:2.7.3.Final
+    container_name: arp_debezium
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: arp-connect-cluster
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Redpanda Console - UI para inspecionar topicos e mensagens do Kafka
+  # Util para validar visualmente que o CDC esta publicando eventos.
+  # ---------------------------------------------------------------------------
+  redpanda-console:
+    image: redpandadata/console:v2.7.2
+    container_name: arp_kafka_console
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_CONNECT_ENABLED: "true"
+      KAFKA_CONNECT_CLUSTERS_NAME: debezium
+      KAFKA_CONNECT_CLUSTERS_URL: http://debezium:8083
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # ClickHouse - banco analitico (dimensoes e tabela fato)
+  # DDL de criacao executado automaticamente na inicializacao.
+  # ---------------------------------------------------------------------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: arp_clickhouse
+    ports:
+      - "8123:8123"   # HTTP
+      - "9000:9000"   # native TCP
+    environment:
+      CLICKHOUSE_USER: arp
+      CLICKHOUSE_PASSWORD: arp
+      CLICKHOUSE_DB: arp_analytics
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      # Scripts DDL executados automaticamente na primeira inicializacao.
+      - ./init-clickhouse:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Coletor Python (Parte 1) - RPA que consome a API do Compras.gov.br
+  # e popula a area de Stage no Postgres. Sobe so depois do Postgres saudavel.
+  # Roda a coleta uma vez e encerra (restart: "no").
+  # ---------------------------------------------------------------------------
+  coletor:
+    build: ./coletor
+    container_name: arp_coletor
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+
+  # ---------------------------------------------------------------------------
+  # Worker Go (Parte 2) - consome o topico do Debezium, higieniza e popula
+  # as dimensoes no ClickHouse usando pool de goroutines + insert em lote.
+  # ---------------------------------------------------------------------------
+  worker:
+    build: ./worker
+    container_name: arp_worker
+    environment:
+      KAFKA_BROKER: kafka:29092
+      KAFKA_TOPIC: arp.stage.arp_item
+      KAFKA_GROUP_ID: arp-worker-go
+      CLICKHOUSE_URL: clickhouse:9000
+      CLICKHOUSE_DB: arp_analytics
+      CLICKHOUSE_USER: arp
+      CLICKHOUSE_PASS: arp
+      NUM_WORKERS: "4"
+      BATCH_SIZE: "1000"
+      BATCH_TIMEOUT_MS: "2000"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    restart: on-failure
+
+  # ---------------------------------------------------------------------------
+  # Airflow - orquestrador de pipelines (Parte 3)
+  # Usa o Postgres existente (banco "airflow") para metadados.
+  # Modo LocalExecutor: sem Celery nem Redis, adequado para dev local.
+  # ---------------------------------------------------------------------------
+  airflow-init:
+    build: ./airflow
+    container_name: arp_airflow_init
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://arp:arp@postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    command: >-
+      bash -c "airflow db migrate &&
+      airflow users create -u admin -p admin -f Admin -l User -r Admin -e admin@example.com || true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  airflow-webserver:
+    build: ./airflow
+    container_name: arp_airflow_webserver
+    ports:
+      - "8085:8080"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://arp:arp@postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__SECRET_KEY: "arp-secret-key-dev"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+    command: webserver
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: on-failure
+
+  airflow-scheduler:
+    build: ./airflow
+    container_name: arp_airflow_scheduler
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://arp:arp@postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__SECRET_KEY: "arp-secret-key-dev"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+    command: scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: on-failure
+
+
+  # ---------------------------------------------------------------------------
+  # Apache Superset - dashboard de BI (Parte 4)
+  # Conecta direto ao ClickHouse via clickhouse-connect.
+  # UI em http://localhost:8088 (admin/admin)
+  # ---------------------------------------------------------------------------
+  superset:
+    image: apache/superset:3.1.3
+    container_name: arp_superset
+    ports:
+      - "8088:8088"
+    environment:
+      SUPERSET_SECRET_KEY: "arp-superset-dev-key-2026"
+      TALISMAN_ENABLED: "False"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    command: >-
+      bash -c "
+        pip install -q clickhouse-connect &&
+        superset db upgrade &&
+        superset fab create-admin --username admin --firstname Admin
+          --lastname User --email admin@superset.com --password admin 2>/dev/null || true &&
+        superset init &&
+        superset run -h 0.0.0.0 -p 8088 --with-threads --reload --debugger
+      "
+    restart: on-failure
+
+volumes:
+  postgres_data:
+  clickhouse_data:
