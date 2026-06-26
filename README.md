@@ -49,13 +49,13 @@ curl http://localhost:8083/connectors/arp-postgres-connector/status
 
 ## Validar que tudo conversa
 
-PostgreSQL — confirmar o schema:
+PostgreSQL :
 
 ```bash
 docker exec -it arp_postgres psql -U arp -d arp_stage -c "\dt stage.*"
 ```
 
-ClickHouse — confirmar as tabelas:
+ClickHouse :
 
 ```bash
 docker exec -it arp_clickhouse clickhouse-client -u arp --password arp \
@@ -71,14 +71,14 @@ docker exec -it arp_postgres psql -U arp -d arp_stage -c \
    VALUES ('TESTE-001', '1', 'item de teste', 100.00);"
 
 # 2. abrir o Redpanda Console em http://localhost:8080 e procurar o tópico
-#    arp.stage.arp_item — a mensagem do insert deve aparecer ali.
+#    arp.stage.arp_item 
 ```
 
 ## Derrubar tudo
 
 ```bash
-docker compose down          # mantém os volumes
-docker compose down -v       # apaga os volumes (reset total)
+docker compose down          
+docker compose down -v       
 ```
 
 ## Próximas etapas
@@ -87,6 +87,6 @@ docker compose down -v       # apaga os volumes (reset total)
    (`/modulo-arp/...`) e popula `stage.arp_ata` e `stage.arp_item` com UPSERT.
 2. **Parte 2** — worker em Go consumindo `arp.stage.arp_item` do Kafka,
    higienizando e gravando nas dimensões do ClickHouse.
-3. **Parte 3** — DAG do Airflow + job PySpark/Pandas montando
+3. **Parte 3** — DAG do Airflow + job PySpark, Pandas montando
    `fato_registro_precos`.
-4. **Parte 4** — dashboard (Superset/Power BI) sobre o ClickHouse.
+4. **Parte 4** — dashboard Superset sobre o ClickHouse.
