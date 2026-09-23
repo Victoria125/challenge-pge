@@ -1,23 +1,23 @@
-# Pipeline de Atas de Registro de Preços — PGE-CE
+# Price Registration Records Pipeline — PGE-CE
 
-Pipeline end-to-end para coleta, processamento e visualização de dados públicos de **Atas de Registro de Preços** do portal Compras.gov.br.
+End-to-end pipeline for collecting, processing, and visualizing public data from **Price Registration Records (Atas de Registro de Preços)** available on the Compras.gov.br portal.
 
-## Arquitetura
+## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         FONTE DE DADOS                              │
-│          API Compras.gov.br (/modulo-arp)                           │
+│                         DATA SOURCE                                 │
+│          Compras.gov.br API (/modulo-arp)                           │
 └────────────────────────────┬────────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  PARTE 1 — RPA + Stage                                              │
+│  PART 1 — RPA + Stage                                               │
 │                                                                     │
-│  coletor Python                                                     │
+│  Python collector                                                   │
 │  - requests + retry/backoff                                         │
-│  - paginação automática                                             │
-│  - UPSERT idempotente (IS DISTINCT FROM)                            │
+│  - automatic pagination                                              │
+│  - idempotent UPSERT (IS DISTINCT FROM)                             │
 │                        │                                            │
 │                        ▼                                            │
 │            PostgreSQL (stage.arp_ata, stage.arp_item)               │
@@ -25,15 +25,15 @@ Pipeline end-to-end para coleta, processamento e visualização de dados públic
                          │ WAL / CDC
                          ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  PARTE 2 — Eventos em Tempo Real                                    │
+│  PART 2 — Real-Time Events                                          │
 │                                                                     │
-│  Debezium → Kafka (tópico arp.stage.arp_item)                       │
+│  Debezium → Kafka (topic arp.stage.arp_item)                        │
 │                        │                                            │
 │                        ▼                                            │
-│  Worker Go — pool de goroutines (produtor-consumidor)               │
-│  - 4 goroutines em paralelo                                         │
-│  - higienização de strings                                          │
-│  - insert em lote no ClickHouse                                     │
+│  Go Worker — goroutine pool (producer-consumer)                     │
+│  - 4 goroutines running in parallel                                 │
+│  - string sanitization                                               │
+│  - batch inserts into ClickHouse                                    │
 │                        │                                            │
 │                        ▼                                            │
 │  ClickHouse (dim_fornecedores, dim_orgaos, dim_itens)               │
@@ -41,12 +41,12 @@ Pipeline end-to-end para coleta, processamento e visualização de dados públic
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  PARTE 3 — Batch + Orquestração                                     │
+│  PART 3 — Batch + Orchestration                                     │
 │                                                                     │
 │  Apache Airflow DAG (fato_registro_precos)                          │
 │  validar_fontes → construir_fato → validar_fato                     │
 │                        │                                            │
-│  Job Pandas: lê stage.arp_item, cruza dimensões                     │
+│  Pandas Job: reads stage.arp_item, joins dimensions                 │
 │                        │                                            │
 │                        ▼                                            │
 │  ClickHouse (fato_registro_precos)                                  │
@@ -54,32 +54,32 @@ Pipeline end-to-end para coleta, processamento e visualização de dados públic
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  PARTE 4 — Dashboard                                                │
+│  PART 4 — Dashboard                                                 │
 │                                                                     │
-│  Apache Superset conectado ao ClickHouse                            │
-│  - Volume financeiro total homologado                               │
-│  - Top 10 fornecedores por volume                                   │
-│  - Histórico de preços por período                                  │
-│  - Visão por órgãos compradores                                     │
+│  Apache Superset connected to ClickHouse                            │
+│  - Total approved financial volume                                  │
+│  - Top 10 suppliers by volume                                       │
+│  - Price history by period                                          │
+│  - View by purchasing organizations                                 │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Stack
 
-| Componente | Tecnologia |
-|---|---|
-| Coleta (RPA) | Python 3.12, requests |
-| Banco transacional | PostgreSQL 16 |
-| CDC | Debezium 2.7 + Apache Kafka 7.6 |
-| Worker de eventos | Go 1.22, segmentio/kafka-go, clickhouse-go |
-| Banco analítico | ClickHouse 24.8 |
-| Orquestração | Apache Airflow 2.9 |
-| Processamento batch | Pandas 2.2 |
-| Dashboard | Apache Superset 3.1 |
+| Component              | Technology                                 |
+| ---------------------- | ------------------------------------------ |
+| Collection (RPA)       | Python 3.12, requests                      |
+| Transactional database | PostgreSQL 16                              |
+| CDC                    | Debezium 2.7 + Apache Kafka 7.6            |
+| Event worker           | Go 1.22, segmentio/kafka-go, clickhouse-go |
+| Analytical database    | ClickHouse 24.8                            |
+| Orchestration          | Apache Airflow 2.9                         |
+| Batch processing       | Pandas 2.2                                 |
+| Dashboard              | Apache Superset 3.1                        |
 
-## DER — Diagrama Entidade-Relacionamento (Stage)
+## ERD — Entity-Relationship Diagram (Stage)
 
-```
+```text
 stage.arp_ata
 ─────────────────────────────────
 PK numero_controle_pncp_ata TEXT
@@ -93,14 +93,14 @@ PK numero_controle_pncp_ata TEXT
    data_vigencia_inicial DATE
    data_vigencia_final DATE
    ingested_at TIMESTAMP
-   updated_at TIMESTAMP        ← monitorado pelo Debezium
+   updated_at TIMESTAMP        ← monitored by Debezium
         │
         │ 1:N
         ▼
 stage.arp_item
 ─────────────────────────────────
 PK numero_controle_pncp_ata TEXT ──┐
-PK numero_item TEXT                │ chave composta
+PK numero_item TEXT                │ composite key
    codigo_item INTEGER             │
    descricao_item TEXT             │
    tipo_item TEXT                  │
@@ -111,12 +111,12 @@ PK numero_item TEXT                │ chave composta
    quantidade_homologada_item NUMERIC
    data_vigencia_inicial DATE
    ingested_at TIMESTAMP
-   updated_at TIMESTAMP        ← monitorado pelo Debezium
+   updated_at TIMESTAMP        ← monitored by Debezium
 ```
 
 ## Star Schema (ClickHouse)
 
-```
+```text
               dim_fornecedores
               ─────────────────
               ni_fornecedor (PK)
@@ -137,19 +137,19 @@ nome_unid.         numero_item                 descricao_item
                                                ano, mes, trimestre
 ```
 
-## Subir o ambiente
+## Start the Environment
 
 ```bash
 docker compose up -d
 ```
 
-Aguarda todos os containers ficarem `healthy` (~2 min):
+Wait for all containers to become `healthy` (~2 min):
 
 ```bash
 docker compose ps
 ```
 
-## Registrar o conector CDC
+## Register the CDC Connector
 
 ```bash
 curl -X POST http://localhost:8083/connectors \
@@ -157,43 +157,43 @@ curl -X POST http://localhost:8083/connectors \
   -d @arp-connector.json
 ```
 
-## Executar a coleta (Parte 1)
+## Run the Collector (Part 1)
 
 ```bash
 docker compose up -d --build coletor
 docker compose logs -f coletor
 ```
 
-## Disparar a DAG (Parte 3)
+## Trigger the DAG (Part 3)
 
 ```bash
 docker exec arp_airflow_scheduler airflow dags unpause fato_registro_precos
 docker exec arp_airflow_scheduler airflow dags trigger fato_registro_precos
 ```
 
-## Acessar os serviços
+## Access the Services
 
-| Serviço | URL | Credenciais |
-|---|---|---|
-| Redpanda Console (Kafka) | http://localhost:8080 | — |
-| Debezium Connect | http://localhost:8083 | — |
-| Airflow | http://localhost:8085 | admin / admin |
-| Superset | http://localhost:8088 | admin / admin |
-| ClickHouse HTTP | http://localhost:8123 | arp / arp |
-| PostgreSQL | localhost:5432 | arp / arp |
+| Service                  | URL                   | Credentials   |
+| ------------------------ | --------------------- | ------------- |
+| Redpanda Console (Kafka) | http://localhost:8080 | —             |
+| Debezium Connect         | http://localhost:8083 | —             |
+| Airflow                  | http://localhost:8085 | admin / admin |
+| Superset                 | http://localhost:8088 | admin / admin |
+| ClickHouse HTTP          | http://localhost:8123 | arp / arp     |
+| PostgreSQL               | localhost:5432        | arp / arp     |
 
-## Estrutura do projeto
+## Project Structure
 
-```
+```text
 .
 ├── docker-compose.yml
-├── arp-connector.json          # configuração do conector Debezium
+├── arp-connector.json          # Debezium connector configuration
 ├── init-postgres/
-│   ├── 01_schema.sql           # DDL do stage (arp_ata, arp_item)
-│   └── 02_airflow_db.sql       # banco de metadados do Airflow
+│   ├── 01_schema.sql           # Stage DDL (arp_ata, arp_item)
+│   └── 02_airflow_db.sql       # Airflow metadata database
 ├── init-clickhouse/
-│   └── 01_schema.sql           # DDL das dimensões e fato
-├── coletor/                    # Parte 1 — RPA Python
+│   └── 01_schema.sql           # Dimension and fact DDL
+├── coletor/                    # Part 1 — Python RPA
 │   ├── main.py
 │   ├── api_client.py
 │   ├── transform.py
@@ -201,7 +201,7 @@ docker exec arp_airflow_scheduler airflow dags trigger fato_registro_precos
 │   ├── config.py
 │   ├── requirements.txt
 │   └── Dockerfile
-├── worker/                     # Parte 2 — Worker Go
+├── worker/                     # Part 2 — Go Worker
 │   ├── main.go
 │   ├── go.mod
 │   ├── Dockerfile
@@ -211,13 +211,16 @@ docker exec arp_airflow_scheduler airflow dags trigger fato_registro_precos
 │       ├── transform/
 │       ├── clickhouse/
 │       └── kafka/
-└── airflow/                    # Parte 3 — Orquestração
+└── airflow/                    # Part 3 — Orchestration
     ├── Dockerfile
     ├── requirements.txt
     └── dags/
         └── dag_fato_registro_precos.py
 ```
 
-## Vídeo de demonstração
+## Demo Video
 
-[Em breve]
+[Coming soon]
+
+```
+```
