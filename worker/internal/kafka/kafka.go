@@ -6,6 +6,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"desafio-arp/worker/internal/config"
+	"desafio-arp/worker/internal/processor"
 )
 
 type Consumer struct {
@@ -24,12 +25,29 @@ func New(cfg config.Config) *Consumer {
 	return &Consumer{reader: reader}
 }
 
-func (c *Consumer) Fetch(ctx context.Context) (kafka.Message, error) {
-	return c.reader.FetchMessage(ctx)
+// FetchMessage never commits offsets automatically.
+func (c *Consumer) Fetch(ctx context.Context) (processor.Message, error) {
+	msg, err := c.reader.FetchMessage(ctx)
+	if err != nil {
+		return processor.Message{}, err
+	}
+	return processor.Message{
+		Topic: msg.Topic, Partition: msg.Partition,
+		Offset: msg.Offset, Value: msg.Value,
+	}, nil
 }
 
-func (c *Consumer) Commit(ctx context.Context, msgs ...kafka.Message) error {
-	return c.reader.CommitMessages(ctx, msgs...)
+// CommitMessages advances through the highest offset in each partition.
+// The processor passes ONLY contiguous, already persisted messages.
+func (c *Consumer) Commit(ctx context.Context, msgs ...processor.Message) error {
+	commits := make([]kafka.Message, len(msgs))
+	for i, msg := range msgs {
+		commits[i] = kafka.Message{
+			Topic: msg.Topic, Partition: msg.Partition,
+			Offset: msg.Offset,
+		}
+	}
+	return c.reader.CommitMessages(ctx, commits...)
 }
 
 func (c *Consumer) Close() error {
