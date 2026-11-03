@@ -1,5 +1,4 @@
-// Package config centraliza a configuracao do worker, lida de variaveis
-// de ambiente para funcionar bem dentro do docker-compose.
+// Package config centraliza as configuracoes do worker.
 package config
 
 import (
@@ -8,16 +7,18 @@ import (
 )
 
 type Config struct {
-	KafkaBroker   string
-	KafkaTopic    string
-	KafkaGroupID  string
-	ClickHouseURL string
-	ClickHouseDB  string
-	ClickHouseUser string
-	ClickHousePass string
-	NumWorkers    int
-	BatchSize     int
-	BatchTimeoutMs int
+	KafkaBroker     string
+	KafkaTopic      string
+	KafkaGroupID    string
+	ClickHouseURL   string
+	ClickHouseDB    string
+	ClickHouseUser  string
+	ClickHousePass  string
+	BatchSize       int
+	BatchTimeoutMs  int
+	RetryAttempts   int
+	RetryBackoffMs  int
+	WriteTimeoutMs  int
 }
 
 func getenv(key, fallback string) string {
@@ -29,7 +30,7 @@ func getenv(key, fallback string) string {
 
 func getenvInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
 	}
@@ -45,11 +46,10 @@ func Load() Config {
 		ClickHouseDB:   getenv("CLICKHOUSE_DB", "arp_analytics"),
 		ClickHouseUser: getenv("CLICKHOUSE_USER", "arp"),
 		ClickHousePass: getenv("CLICKHOUSE_PASS", "arp"),
-		// pool de goroutines que processam mensagens em paralelo
-		NumWorkers: getenvInt("NUM_WORKERS", 4),
-		// quantos registros acumular antes de gravar em lote no ClickHouse
-		BatchSize: getenvInt("BATCH_SIZE", 1000),
-		// tempo maximo de espera antes de gravar um lote parcial (ms)
+		BatchSize:      getenvInt("BATCH_SIZE", 1000),
 		BatchTimeoutMs: getenvInt("BATCH_TIMEOUT_MS", 2000),
+		RetryAttempts:  getenvInt("RETRY_ATTEMPTS", 3),
+		RetryBackoffMs: getenvInt("RETRY_BACKOFF_MS", 1000),
+		WriteTimeoutMs: getenvInt("WRITE_TIMEOUT_MS", 30000),
 	}
 }

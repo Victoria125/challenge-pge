@@ -156,7 +156,7 @@ services:
 
   # ---------------------------------------------------------------------------
   # Worker Go (Parte 2) - consome o topico do Debezium, higieniza e popula
-  # as dimensoes no ClickHouse usando pool de goroutines + insert em lote.
+  # as dimensoes no ClickHouse com fetch ordenado, retries e inserts em lote.
   # ---------------------------------------------------------------------------
   worker:
     build: ./worker
@@ -169,9 +169,11 @@ services:
       CLICKHOUSE_DB: arp_analytics
       CLICKHOUSE_USER: arp
       CLICKHOUSE_PASS: arp
-      NUM_WORKERS: "4"
       BATCH_SIZE: "1000"
       BATCH_TIMEOUT_MS: "2000"
+      RETRY_ATTEMPTS: "3"
+      RETRY_BACKOFF_MS: "1000"
+      WRITE_TIMEOUT_MS: "30000"
     depends_on:
       kafka:
         condition: service_healthy

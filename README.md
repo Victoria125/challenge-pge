@@ -30,10 +30,10 @@ End-to-end pipeline for collecting, processing, and visualizing public data from
 │  Debezium → Kafka (topic arp.stage.arp_item)                        │
 │                        │                                            │
 │                        ▼                                            │
-│  Go Worker — goroutine pool (producer-consumer)                     │
-│  - 4 goroutines running in parallel                                 │
+│  Go Worker — ordered CDC consumer                                   │
+│  - Kafka manual commits only after successful persistence           │
+│  - retry/backoff + batch inserts into ClickHouse                     │
 │  - string sanitization                                               │
-│  - batch inserts into ClickHouse                                    │
 │                        │                                            │
 │                        ▼                                            │
 │  ClickHouse (dim_fornecedores, dim_orgaos, dim_itens)               │
@@ -216,6 +216,46 @@ docker exec arp_airflow_scheduler airflow dags trigger fato_registro_precos
     ├── requirements.txt
     └── dags/
         └── dag_fato_registro_precos.py
+```
+
+## CDC worker reliability (Go)
+
+The worker now uses **one ordered fetch/processing loop** and still writes
+**batches** to ClickHouse. This deliberately trades parallel throughput for
+correct offset handling until partition-aware concurrency is implemented.
+
+- Uses `FetchMessage` (not `ReadMessage`): Kafka does not acknowledge records on fetch.
+- Persists supplier, agency and item dimensions **before** confirming the batch offsets.
+- Retries failed inserts with exponential backoff; after all attempts fail, the
+  process exits non-zero and Docker's `restart: on-failure` allows Kafka to
+  replay from the last confirmed offset.
+- Retries a failed Kafka commit separately, **without rewriting the batch**.
+- Preserves ordered processing/contiguous commits within each Kafka partition.
+- Rejects malformed events, CDC deletes and `item_excluido=true` **without
+  committing their offsets**. These records require explicit implementation or
+  operator intervention; otherwise the worker intentionally stops rather than
+  silently dropping changes.
+- Kafka tombstones (empty/null message values) are deliberately acknowledged
+  after the pending batch has been persisted.
+
+Configuration: `BATCH_SIZE`, `BATCH_TIMEOUT_MS`, `RETRY_ATTEMPTS`,
+`RETRY_BACKOFF_MS`, `WRITE_TIMEOUT_MS`.
+
+**Delivery guarantee:** at-least-once, **not** exactly-once. ClickHouse uses
+`ReplacingMergeTree`, which merges repeated keys eventually rather than
+enforcing immediate uniqueness. Replays after partial dimension writes or failed
+offset commits can temporarily create duplicates. For strict version ordering
+and production deployment, add deterministic source versions, correct delete
+handling, consistency checks (e.g. `FINAL` or suitable `argMax` queries),
+an explicit DLQ policy, and load/failure-injection tests.
+
+Unit tests, including failed ClickHouse writes, commit failures, invalid CDC
+events and replays:
+
+```bash
+cd worker
+go mod tidy
+go test ./...
 ```
 
 ## Demo Video
