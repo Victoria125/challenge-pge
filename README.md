@@ -231,10 +231,17 @@ correct offset handling until partition-aware concurrency is implemented.
   replay from the last confirmed offset.
 - Retries a failed Kafka commit separately, **without rewriting the batch**.
 - Preserves ordered processing/contiguous commits within each Kafka partition.
-- Rejects malformed events, CDC deletes and `item_excluido=true` **without
-  committing their offsets**. These records require explicit implementation or
-  operator intervention; otherwise the worker intentionally stops rather than
-  silently dropping changes.
+- Processes `item_excluido=true` as a **valid dimension event**: excluded
+  facts do not delete the corresponding supplier/agency/item dimensions.
+- Logs CDC `op=d` deletes and acknowledges them **without removing dimensions**.
+  The fact DAG reads the current stage, excluding removed and soft-deleted rows.
+- Sends malformed JSON, invalid `after` and unsupported CDC operations to a
+  dedicated Kafka DLQ (`arp.stage.arp_item.dlq`). The source offset advances
+  **only after** Kafka acknowledges the DLQ publication and any prior ClickHouse
+  batch writes succeed. A temporary DLQ outage is retried; if exhausted, the
+  uncommitted event is replayed after restart instead of disappearing.
+- Uses `snapshot.mode=initial` instead of `always` for Debezium; existing
+  running connectors must be updated, not merely restarted.
 - Kafka tombstones (empty/null message values) are deliberately acknowledged
   after the pending batch has been persisted.
 
@@ -257,6 +264,59 @@ cd worker
 go mod tidy
 go test ./...
 ```
+
+## Known limitations and operational checks
+
+- **Collector is not a network-incremental crawler**: the documented Compras.gov.br
+  listing endpoints filter by validity dates. No verified, global
+  last-updated cursor is available for a safe delta scan. We keep the
+  configured full-window fetch rather than risking missing corrections.
+  PostgreSQL now updates rows only when **any mutable field changed**, and
+  rolls back failed batches.
+- **Fact snapshot is atomic for readers**: load into
+  `fato_registro_precos_next`, reject unknown/invalid numeric fields
+  instead of coercing them to zero, verify counts, then atomically exchange
+  tables using the ClickHouse `Atomic` database engine. This avoids an
+  empty live fact after an insert failure. Runs are serialized by Airflow.
+- **Superset** runs using Gunicorn, without Flask `--reload/--debugger`.
+  An authentic export ZIP, if present at
+  `superset/exports/arp-dashboard.zip`, is imported on startup.
+  The **original dashboard is still absent** from this repository;
+  see `superset/exports/README.md` for the export process. We do not
+  claim to reproduce Part 4 until the ZIP is committed and tested.
+- **DLQ replay:** DLQ writes can be duplicated if ClickHouse or Kafka commit
+  fails later. Deduplicate for reprocessing using
+  `source_topic + partition + offset`. The local single-broker Kafka is
+  only a development setup, not an HA durable deployment.
+- **At-least-once, not exactly-once:** `ReplacingMergeTree` deduplication is
+  eventual. Source-defined versions, hard-deletion semantics, and full
+  integration tests are further production work.
+- Update an already-registered connector after changing
+  `arp-connector.json`, for example:
+
+  ```bash
+  python -c 'import json; print(json.dumps(json.load(open("arp-connector.json"))["config"]))' > /tmp/arp-config.json
+  curl -X PUT -H "Content-Type: application/json" \
+    --data-binary @/tmp/arp-config.json \
+    http://localhost:8083/connectors/arp-postgres-connector/config
+  ```
+
+Run the tests:
+
+```bash
+cd worker && go test ./...
+cd .. && python -m unittest discover -s coletor/tests -v
+python -m unittest discover -s airflow/tests -v
+```
+
+**Evidence from public PGE-related GitHub code:** 
+`devjuliomesquita/Desafio_Mais_Cond` separates Kafka listeners
+from application services, and
+`devjuliomesquita/seed-desafio-cdc` uses explicit transactions and
+propagates persistence errors. `Andressa-Evelyn/compras-gov-data-pipeline`
+implements a similar end-to-end pipeline. The DLQ protocol, atomic swap and
+safe Kafka commit rules in *this repository* are engineering adaptations,
+**not verified production implementations by those developers**.
 
 ## Demo Video
 
