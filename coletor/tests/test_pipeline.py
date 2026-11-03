@@ -10,9 +10,22 @@ import psycopg2
 from api_client import ComprasAPIClient
 from main import em_lotes
 from repository import StageRepository
+from transform import limpar_numero, limpar_booleano, normalizar_item
+from decimal import Decimal
 
 
 class TestCollector(unittest.TestCase):
+    def test_money_preserves_decimal_precision(self):
+        self.assertEqual(limpar_numero("0E-8"), Decimal("0E-8"))
+        self.assertEqual(limpar_numero("123456789.1234"), Decimal("123456789.1234"))
+        with self.assertRaises(ValueError):
+            limpar_numero("invalido")
+
+    def test_boolean_excluded_does_not_treat_string_false_as_true(self):
+        self.assertFalse(limpar_booleano("false"))
+        self.assertTrue(limpar_booleano("true"))
+        self.assertFalse(normalizar_item({"itemExcluido": "false"})["item_excluido"])
+
     def test_batches_dont_discard_last_partial_batch(self):
         self.assertEqual(list(em_lotes(iter(range(5)), 2)), [[0, 1], [2, 3], [4]])
 
