@@ -2,14 +2,34 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
 
-def limpar_numero(valor: Any) -> Optional[float]:
-    """Converte valor para float tratando notacao cientifica (ex: 0E-8)."""
-    if valor is None:
+def limpar_numero(valor: Any) -> Optional[Decimal]:
+    """Preserva precisao monetaria do PostgreSQL NUMERIC, inclusive 0E-8."""
+    if valor is None or valor == "":
         return None
     try:
-        return float(Decimal(str(valor)))
-    except (InvalidOperation, ValueError, TypeError):
-        return None
+        numero = Decimal(str(valor))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError(f"Valor numerico invalido na API: {valor!r}") from exc
+    if not numero.is_finite():
+        raise ValueError(f"Valor numerico nao finito na API: {valor!r}")
+    return numero
+
+
+def limpar_booleano(valor: Any) -> bool:
+    """Evita que bool('false') seja interpretado como True."""
+    if isinstance(valor, bool):
+        return valor
+    if valor is None:
+        return False
+    if valor in (0, 1):
+        return bool(valor)
+    if isinstance(valor, str):
+        texto = valor.strip().lower()
+        if texto in ("false", "0", "nao", "não"):
+            return False
+        if texto in ("true", "1", "sim"):
+            return True
+    raise ValueError(f"Booleano invalido na API: {valor!r}")
 
 
 def limpar_texto(valor: Any) -> Optional[str]:
@@ -52,7 +72,7 @@ def normalizar_ata(reg: dict) -> dict:
         "link_compra_pncp": limpar_texto(reg.get("linkCompraPNCP")),
         "numero_controle_pncp_compra": limpar_texto(reg.get("numeroControlePncpCompra")),
         "id_compra": limpar_texto(reg.get("idCompra")),
-        "ata_excluido": bool(reg.get("ataExcluido", False)),
+        "ata_excluido": limpar_booleano(reg.get("ataExcluido", False)),
         "data_hora_exclusao_fonte": limpar_texto(reg.get("dataHoraExclusao")),
         "data_hora_inclusao_fonte": limpar_texto(reg.get("dataHoraInclusao")),
         "data_hora_atualizacao_fonte": limpar_texto(reg.get("dataHoraAtualizacao")),
@@ -91,7 +111,7 @@ def normalizar_item(reg: dict) -> dict:
         "situacao_sicaf": limpar_texto(reg.get("situacaoSicaf")),
         "id_compra": limpar_texto(reg.get("idCompra")),
         "numero_controle_pncp_compra": limpar_texto(reg.get("numeroControlePncpCompra")),
-        "item_excluido": bool(reg.get("itemExcluido", False)),
+        "item_excluido": limpar_booleano(reg.get("itemExcluido", False)),
         "data_hora_exclusao_fonte": limpar_texto(reg.get("dataHoraExclusao")),
         "data_hora_inclusao_fonte": limpar_texto(reg.get("dataHoraInclusao")),
         "data_hora_atualizacao_fonte": limpar_texto(reg.get("dataHoraAtualizacao")),
