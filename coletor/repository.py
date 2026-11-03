@@ -45,21 +45,30 @@ class StageRepository:
         conflict_cols = ", ".join(pk)
         cols_sql = ", ".join(colunas)
 
+        # Compare all mutable fields: source timestamps alone can miss corrections.
+        old_values = ", ".join(f"{tabela}.{c}" for c in colunas_update)
+        new_values = ", ".join(f"EXCLUDED.{c}" for c in colunas_update)
+
         sql = f"""
             INSERT INTO {tabela} ({cols_sql})
             VALUES %s
             ON CONFLICT ({conflict_cols}) DO UPDATE SET {set_clause}
-            WHERE {tabela}.data_hora_atualizacao_fonte
-                  IS DISTINCT FROM EXCLUDED.data_hora_atualizacao_fonte
+            WHERE ({old_values}) IS DISTINCT FROM ({new_values})
         """
 
         valores = [[reg[c] for c in colunas] for reg in registros]
 
-        with self.conn.cursor() as cur:
-            execute_values(cur, sql, valores, page_size=500)
-            afetados = cur.rowcount
-        self.conn.commit()
-        return afetados
+        try:
+            with self.conn.cursor() as cur:
+                execute_values(cur, sql, valores, page_size=500)
+                afetados = cur.rowcount
+            self.conn.commit()
+            return afetados
+        except Exception:
+            # Keep the long-lived connection usable for a later retry.
+            self.conn.rollback()
+            logger.exception("Falha no UPSERT de %s; lote revertido", tabela)
+            raise
 
     def salvar_atas(self, registros: list[dict]) -> int:
         return self._upsert(

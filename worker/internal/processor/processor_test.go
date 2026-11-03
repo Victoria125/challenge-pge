@@ -43,6 +43,22 @@ func (f *fakeConsumer) Commit(_ context.Context, messages ...Message) error {
 	return nil
 }
 
+type fakeDLQ struct {
+	order *[]string
+	fail int
+	published []Message
+}
+
+func (f *fakeDLQ) Publish(_ context.Context, msg Message, _ error) error {
+	*f.order = append(*f.order, "dlq")
+	if f.fail > 0 {
+		f.fail--
+		return errors.New("DLQ indisponivel")
+	}
+	f.published = append(f.published, msg)
+	return nil
+}
+
 type fakeSink struct {
 	order          *[]string
 	failFornecedores int
@@ -114,7 +130,7 @@ func TestBatchIsPersistedBeforeCommit(t *testing.T) {
 		message(10, event(1)), message(11, event(2)),
 	}}
 	sink := &fakeSink{order: &order}
-	err := Run(context.Background(), reader, sink, configForTest(2))
+	err := Run(context.Background(), reader, sink, &fakeDLQ{order: &order}, configForTest(2))
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("esperava fim do reader fake, recebeu: %v", err)
 	}
@@ -131,7 +147,7 @@ func TestFailedClickHouseWriteNeverCommits(t *testing.T) {
 	var order []string
 	reader := &fakeConsumer{order: &order, messages: []Message{message(10, event(1))}}
 	sink := &fakeSink{order: &order, failOrgaos: 2}
-	err := Run(context.Background(), reader, sink, configForTest(1))
+	err := Run(context.Background(), reader, sink, &fakeDLQ{order: &order}, configForTest(1))
 	if err == nil || !strings.Contains(err.Error(), "offsets preservados") {
 		t.Fatalf("esperava falha permanente de gravacao, recebeu: %v", err)
 	}
@@ -144,7 +160,7 @@ func TestTransientClickHouseFailureIsRetried(t *testing.T) {
 	var order []string
 	reader := &fakeConsumer{order: &order, messages: []Message{message(10, event(1))}}
 	sink := &fakeSink{order: &order, failFornecedores: 1}
-	err := Run(context.Background(), reader, sink, configForTest(1))
+	err := Run(context.Background(), reader, sink, &fakeDLQ{order: &order}, configForTest(1))
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("esperava concluir lote antes de EOF: %v", err)
 	}
@@ -161,7 +177,7 @@ func TestCommitRetryDoesNotRepeatInserts(t *testing.T) {
 		failCommits: 1,
 	}
 	sink := &fakeSink{order: &order}
-	err := Run(context.Background(), reader, sink, configForTest(1))
+	err := Run(context.Background(), reader, sink, &fakeDLQ{order: &order}, configForTest(1))
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("erro inesperado: %v", err)
 	}
@@ -171,29 +187,94 @@ func TestCommitRetryDoesNotRepeatInserts(t *testing.T) {
 	}
 }
 
-func TestMalformedAndDeleteEventsAreNotAcknowledged(t *testing.T) {
+func TestInvalidCDCIsDLQPublishedBeforeCommit(t *testing.T) {
 	for _, v := range [][]byte{
 		[]byte("{invalido"),
-		[]byte("{\"op\":\"d\",\"after\":null}"),
 		[]byte("{\"op\":\"u\",\"after\":null}"),
+		[]byte("{\"op\":\"unknown\",\"after\":{}}"),
 	} {
 		var order []string
 		reader := &fakeConsumer{order: &order, messages: []Message{message(17, v)}}
 		sink := &fakeSink{order: &order}
-		if err := Run(context.Background(), reader, sink, configForTest(1)); err == nil {
-			t.Fatalf("evento invalido deveria falhar: %s", v)
+		dlq := &fakeDLQ{order: &order}
+		err := Run(context.Background(), reader, sink, dlq, configForTest(1))
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("evento invalido deve ir para DLQ e continuar: %v", err)
 		}
-		if reader.commitCalls != 0 || len(order) != 0 {
-			t.Fatalf("evento invalido nao pode ser gravado/confirmado: %s", v)
+		if len(dlq.published) != 1 || reader.commitCalls != 1 {
+			t.Fatalf("DLQ/offset inconsistente: events=%d commits=%d", len(dlq.published), reader.commitCalls)
+		}
+		if len(order) == 0 || order[0] != "dlq" || order[len(order)-1] != "commit" {
+			t.Fatalf("DLQ deve preceder o commit: %v", order)
 		}
 	}
 }
 
+func TestUnavailableDLQPreventsOffsetCommit(t *testing.T) {
+	var order []string
+	reader := &fakeConsumer{order: &order, messages: []Message{message(17, []byte("{invalido"))}}
+	dlq := &fakeDLQ{order: &order, fail: 2}
+	err := Run(context.Background(), reader, &fakeSink{order: &order}, dlq, configForTest(1))
+	if err == nil || !strings.Contains(err.Error(), "offset nao confirmado") {
+		t.Fatalf("DLQ indisponivel deve falhar sem commit: %v", err)
+	}
+	if reader.commitCalls != 0 {
+		t.Fatal("DLQ indisponivel jamais confirma offset")
+	}
+}
+
+func TestCDCDeleteAdvancesWithoutRemovingDimensions(t *testing.T) {
+	var order []string
+	reader := &fakeConsumer{order: &order, messages: []Message{
+		message(18, []byte("{\"op\":\"d\",\"after\":null}")),
+	}}
+	sink := &fakeSink{order: &order}
+	dlq := &fakeDLQ{order: &order}
+	if err := Run(context.Background(), reader, sink, dlq, configForTest(1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("delete esperado como evento valido sem insercao: %v", err)
+	}
+	if reader.commitCalls != 1 || len(dlq.published) != 0 {
+		t.Fatalf("delete deve ser confirmado sem DLQ: %#v", order)
+	}
+}
+
+func TestExcludedItemStillPersistsDimensions(t *testing.T) {
+	var order []string
+	raw := []byte("{\"op\":\"r\",\"after\":{\"numero_controle_pncp_ata\":\"ATA-1\",\"numero_item\":\"1\",\"codigo_item\":1,\"item_excluido\":true}}")
+	reader := &fakeConsumer{order: &order, messages: []Message{message(19, raw)}}
+	if err := Run(context.Background(), reader, &fakeSink{order: &order},
+		&fakeDLQ{order: &order}, configForTest(1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("item excluido deve manter dimensoes: %v", err)
+	}
+	expected := []string{"fornecedores", "orgaos", "itens", "commit"}
+	if !reflect.DeepEqual(order, expected) {
+		t.Fatalf("item excluido deixou de processar dimensoes: %v", order)
+	}
+}
+
+func TestInvalidBetweenValidRowsDoesNotSkipEarlierOffsets(t *testing.T) {
+	var order []string
+	reader := &fakeConsumer{order: &order, messages: []Message{
+		message(0, event(1)),
+		message(1, []byte("{invalid")),
+		message(2, event(2)),
+	}}
+	dlq := &fakeDLQ{order: &order}
+	if err := Run(context.Background(), reader, &fakeSink{order: &order},
+		dlq, configForTest(3)); !errors.Is(err, io.EOF) {
+		t.Fatalf("deveria continuar após DLQ: %v", err)
+	}
+	if reader.commitCalls != 1 || len(reader.committed) != 3 || len(dlq.published) != 1 {
+		t.Fatalf("ordem/perda de offsets: committed=%d, dlq=%d",
+			len(reader.committed), len(dlq.published))
+	}
+}
+ 
 func TestTombstoneIsAcknowledgedWithoutInserts(t *testing.T) {
 	var order []string
 	reader := &fakeConsumer{order: &order, messages: []Message{message(18, nil)}}
 	sink := &fakeSink{order: &order}
-	err := Run(context.Background(), reader, sink, configForTest(1))
+	err := Run(context.Background(), reader, sink, &fakeDLQ{order: &order}, configForTest(1))
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("erro inesperado: %v", err)
 	}

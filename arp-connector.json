@@ -14,7 +14,7 @@
     "plugin.name": "pgoutput",
     "slot.name": "arp_debezium_slot",
     "publication.autocreate.mode": "filtered",
-    "snapshot.mode": "always",
+    "snapshot.mode": "initial",
     "tombstones.on.delete": "false",
     "decimal.handling.mode": "string",
     "time.precision.mode": "connect",
