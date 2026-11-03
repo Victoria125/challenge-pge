@@ -22,6 +22,10 @@ jobs:
           python-version: "3.11"
       - name: Install runtime dependencies
         run: pip install -r coletor/requirements.txt -r airflow/requirements.txt
+      - name: Validate Docker Compose configuration
+        run: |
+          cp coletor/.env.example .env
+          docker compose config --quiet
       - name: Compile Python scripts
         run: python -m compileall -q coletor airflow/dags
       - name: Test collector
