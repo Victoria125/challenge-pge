@@ -165,6 +165,7 @@ services:
       KAFKA_BROKER: kafka:29092
       KAFKA_TOPIC: arp.stage.arp_item
       KAFKA_GROUP_ID: arp-worker-go
+      KAFKA_DLQ_TOPIC: arp.stage.arp_item.dlq
       CLICKHOUSE_URL: clickhouse:9000
       CLICKHOUSE_DB: arp_analytics
       CLICKHOUSE_USER: arp
@@ -258,6 +259,8 @@ services:
     environment:
       SUPERSET_SECRET_KEY: "arp-superset-dev-key-2026"
       TALISMAN_ENABLED: "False"
+    volumes:
+      - ./superset/exports:/app/superset-import:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -270,7 +273,12 @@ services:
         superset fab create-admin --username admin --firstname Admin
           --lastname User --email admin@superset.com --password admin 2>/dev/null || true &&
         superset init &&
-        superset run -h 0.0.0.0 -p 8088 --with-threads --reload --debugger
+        if [ -f /app/superset-import/arp-dashboard.zip ]; then
+          superset import_dashboards --path /app/superset-import/arp-dashboard.zip --username admin;
+        else
+          echo 'AVISO: export do dashboard nao incluido; veja superset/exports/README.md';
+        fi &&
+        exec gunicorn --bind 0.0.0.0:8088 --workers 2 --timeout 120 'superset.app:create_app()'
       "
     restart: on-failure
 
