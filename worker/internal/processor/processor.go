@@ -27,6 +27,11 @@ type Consumer interface {
 	Commit(context.Context, ...Message) error
 }
 
+// DeadLetterPublisher durably stores malformed CDC events before their offsets can advance.
+type DeadLetterPublisher interface {
+	Publish(context.Context, Message, error) error
+}
+
 type Sink interface {
 	InserirFornecedores(context.Context, []model.DimFornecedor) error
 	InserirOrgaos(context.Context, []model.DimOrgao) error
@@ -59,8 +64,8 @@ func (b *batch) add(msg Message, item *model.ArpItem) {
 	b.itens = append(b.itens, it)
 }
 
-// decode rejects unsupported deletes and malformed records rather than
-// acknowledging them as if they had been applied to ClickHouse.
+// decode preserves dimension history: a stage DELETE does not delete an entity
+// dimension. Malformed changes are returned as errors for the Kafka DLQ.
 func decode(value []byte) (*model.ArpItem, error) {
 	payload := bytes.TrimSpace(value)
 	if len(payload) == 0 || bytes.Equal(payload, []byte("null")) {
@@ -75,7 +80,8 @@ func decode(value []byte) (*model.ArpItem, error) {
 	case "c", "u", "r":
 		// create, update, initial snapshot
 	case "d":
-		return nil, errors.New("DELETE de CDC ainda nao suportado: evento nao confirmado")
+		log.Printf("CDC DELETE ignorado para dimensoes; stage/BI controlam exclusoes logicas")
+		return nil, nil
 	default:
 		return nil, fmt.Errorf("operacao CDC desconhecida %q", evt.Op)
 	}
@@ -90,16 +96,17 @@ func decode(value []byte) (*model.ArpItem, error) {
 	if item.NumeroControlePncpAta == "" || item.NumeroItem == "" {
 		return nil, errors.New("CDC sem chave da ata ou do item")
 	}
-	if item.ItemExcluido {
-		return nil, errors.New("item marcado como excluido: remocao na dimensao nao implementada")
-	}
+	// item_excluido representa o status do fato, nao a existencia da dimensao.
 	transform.Higienizar(&item)
 	return &item, nil
 }
 
 // Run fetches in a single ordered stream. A future parallel version must
 // preserve contiguous per-partition offset completion before each commit.
-func Run(ctx context.Context, consumer Consumer, sink Sink, cfg Config) error {
+func Run(ctx context.Context, consumer Consumer, sink Sink, dlq DeadLetterPublisher, cfg Config) error {
+	if dlq == nil {
+		return errors.New("publicador DLQ obrigatorio")
+	}
 	if cfg.BatchSize <= 0 || cfg.BatchTimeout <= 0 ||
 		cfg.RetryAttempts <= 0 || cfg.RetryBackoff <= 0 || cfg.WriteTimeout <= 0 {
 		return errors.New("configuracao de batch, timeout ou retry invalida")
@@ -135,7 +142,11 @@ func Run(ctx context.Context, consumer Consumer, sink Sink, cfg Config) error {
 
 		item, err := decode(msg.Value)
 		if err != nil {
-			return fmt.Errorf("CDC partition=%d offset=%d: %w", msg.Partition, msg.Offset, err)
+			// Never acknowledge malformed CDC until Kafka confirms the DLQ publication.
+			if publishErr := publishInvalid(ctx, dlq, msg, err, cfg); publishErr != nil {
+				return fmt.Errorf("DLQ partition=%d offset=%d: %w", msg.Partition, msg.Offset, publishErr)
+			}
+			log.Printf("CDC invalido enviado a DLQ: partition=%d offset=%d: %v", msg.Partition, msg.Offset, err)
 		}
 		if len(pending.messages) == 0 {
 			firstReceived = time.Now()
@@ -148,6 +159,25 @@ func Run(ctx context.Context, consumer Consumer, sink Sink, cfg Config) error {
 			pending = batch{}
 		}
 	}
+}
+
+func publishInvalid(ctx context.Context, publisher DeadLetterPublisher, msg Message, cause error, cfg Config) error {
+	for attempt := 1; attempt <= cfg.RetryAttempts; attempt++ {
+		publishCtx, cancel := context.WithTimeout(ctx, cfg.WriteTimeout)
+		err := publisher.Publish(publishCtx, msg, cause)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		log.Printf("falha enviando DLQ (%d/%d): %v", attempt, cfg.RetryAttempts, err)
+		if attempt == cfg.RetryAttempts {
+			return fmt.Errorf("DLQ indisponivel; offset nao confirmado: %w", err)
+		}
+		if err := retryWait(ctx, cfg.RetryBackoff, attempt); err != nil {
+			return err
+		}
+	}
+	return errors.New("DLQ nao confirmada")
 }
 
 func persist(ctx context.Context, sink Sink, b *batch) error {
