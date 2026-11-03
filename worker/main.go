@@ -33,7 +33,10 @@ func run() error {
 	consumer := kafkaconsumer.New(cfg)
 	defer consumer.Close()
 
-	return processor.Run(ctx, consumer, ch, processor.Config{
+	dlq := kafkaconsumer.NewDLQPublisher(cfg)
+	defer dlq.Close()
+
+	return processor.Run(ctx, consumer, ch, dlq, processor.Config{
 		BatchSize:     cfg.BatchSize,
 		BatchTimeout:  time.Duration(cfg.BatchTimeoutMs) * time.Millisecond,
 		RetryAttempts: cfg.RetryAttempts,
