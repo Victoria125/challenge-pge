@@ -61,6 +61,20 @@ services:
       timeout: 10s
       retries: 5
 
+  # Dead Letter Queue para eventos CDC irrecuperaveis. Deve existir antes do worker.
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.1
+    command: >-
+      bash -c "kafka-topics --bootstrap-server kafka:29092
+      --create --if-not-exists --topic arp.stage.arp_item.dlq
+      --partitions 3 --replication-factor 1
+      --config retention.ms=2592000000"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
   # ---------------------------------------------------------------------------
   # Debezium (Kafka Connect) - captura de alteracoes (CDC) do Postgres
   # O conector em si e registrado depois que tudo sobe (ver README).
@@ -180,6 +194,8 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
     restart: on-failure
 
   # ---------------------------------------------------------------------------
