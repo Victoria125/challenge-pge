@@ -1,0 +1,27 @@
+name: Go CDC worker tests
+
+on:
+  pull_request:
+    paths:
+      - "worker/**"
+      - ".github/workflows/go-worker-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "worker/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Resolve module dependencies
+        run: go mod tidy
+      - name: Run worker unit tests
+        run: go test ./...
