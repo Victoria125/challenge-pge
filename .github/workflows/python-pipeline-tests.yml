@@ -1,0 +1,30 @@
+name: Collector and Airflow transformation tests
+
+on:
+  pull_request:
+    paths:
+      - "coletor/**"
+      - "airflow/**"
+      - ".github/workflows/python-pipeline-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "coletor/**"
+      - "airflow/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install runtime dependencies
+        run: pip install -r coletor/requirements.txt -r airflow/requirements.txt
+      - name: Compile Python scripts
+        run: python -m compileall -q coletor airflow/dags
+      - name: Test collector
+        run: python -m unittest discover -s coletor/tests -v
+      - name: Test fact validation
+        run: python -m unittest discover -s airflow/tests -v
