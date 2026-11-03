@@ -10,6 +10,7 @@ type Config struct {
 	KafkaBroker     string
 	KafkaTopic      string
 	KafkaGroupID    string
+	KafkaDLQTopic   string
 	ClickHouseURL   string
 	ClickHouseDB    string
 	ClickHouseUser  string
@@ -42,6 +43,7 @@ func Load() Config {
 		KafkaBroker:    getenv("KAFKA_BROKER", "kafka:29092"),
 		KafkaTopic:     getenv("KAFKA_TOPIC", "arp.stage.arp_item"),
 		KafkaGroupID:   getenv("KAFKA_GROUP_ID", "arp-worker-go"),
+		KafkaDLQTopic: getenv("KAFKA_DLQ_TOPIC", "arp.stage.arp_item.dlq"),
 		ClickHouseURL:  getenv("CLICKHOUSE_URL", "clickhouse:9000"),
 		ClickHouseDB:   getenv("CLICKHOUSE_DB", "arp_analytics"),
 		ClickHouseUser: getenv("CLICKHOUSE_USER", "arp"),
