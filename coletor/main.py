@@ -3,6 +3,9 @@ import sys
 from itertools import islice
 from typing import Iterator
 
+import psycopg2
+import requests
+
 from api_client import ComprasAPIClient
 from repository import StageRepository
 from transform import normalizar_ata, normalizar_item
@@ -58,9 +61,9 @@ def main() -> None:
         coletar_atas(api, repo)
         coletar_itens(api, repo)
         logger.info("Coleta concluida com sucesso.")
-    except Exception:
-        logger.exception("Coleta interrompida por erro.")
-        sys.exit(1)
+    except (requests.RequestException, psycopg2.Error, ValueError) as exc:
+        logger.exception("Coleta interrompida por falha esperada: %s", exc)
+        raise  # Error reaches the orchestrator / container exit code.
     finally:
         repo.close()
 
