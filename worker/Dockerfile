@@ -2,7 +2,7 @@
 FROM golang:1.22-alpine AS build
 WORKDIR /src
 COPY go.mod ./
-RUN go mod download 2>/dev/null || true
+RUN go mod download
 COPY . .
 RUN go mod tidy && go build -o /worker .
 

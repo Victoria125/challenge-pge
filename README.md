@@ -46,7 +46,7 @@ End-to-end pipeline for collecting, processing, and visualizing public data from
 │  Apache Airflow DAG (fato_registro_precos)                          │
 │  validar_fontes → construir_fato → validar_fato                     │
 │                        │                                            │
-│  Pandas Job: reads stage.arp_item, joins dimensions                 │
+│  Pandas Job: validates stage.arp_item; no joins                 │
 │                        │                                            │
 │                        ▼                                            │
 │  ClickHouse (fato_registro_precos)                                  │
@@ -57,7 +57,7 @@ End-to-end pipeline for collecting, processing, and visualizing public data from
 │  PART 4 — Dashboard                                                 │
 │                                                                     │
 │  Apache Superset connected to ClickHouse                            │
-│  - Total approved financial volume                                  │
+│  - Value registered in eligible ARP items                                  │
 │  - Top 10 suppliers by volume                                       │
 │  - Price history by period                                          │
 │  - View by purchasing organizations                                 │
@@ -70,7 +70,7 @@ End-to-end pipeline for collecting, processing, and visualizing public data from
 | ---------------------- | ------------------------------------------ |
 | Collection (RPA)       | Python 3.12, requests                      |
 | Transactional database | PostgreSQL 16                              |
-| CDC                    | Debezium 2.7 + Apache Kafka 7.6            |
+| CDC                    | Debezium 2.7 + Confluent cp-kafka 7.6.1   |
 | Event worker           | Go 1.22, segmentio/kafka-go, clickhouse-go |
 | Analytical database    | ClickHouse 24.8                            |
 | Orchestration          | Apache Airflow 2.9                         |
@@ -95,7 +95,7 @@ PK numero_controle_pncp_ata TEXT
    ingested_at TIMESTAMP
    updated_at TIMESTAMP        ← monitored by Debezium
         │
-        │ 1:N
+        │ logical 1:N (no database FK)
         ▼
 stage.arp_item
 ─────────────────────────────────
@@ -130,15 +130,13 @@ nome_unid.         numero_item                 descricao_item
                    ni_fornecedor (FK)          tipo_item
                    codigo_unid_ger. (FK)       codigo_pdm
                    codigo_item (FK)            nome_pdm
-                   data_vigencia_inicial (FK)
-                   valor_unitario              dim_tempo
-                   valor_total            ──►  ─────────
-                   qtd_homologada              data (PK)
-                                               ano, mes, trimestre
+                   data_vigencia_inicial       dim_tempo (not populated)
+                   valor_unitario              ─────────
+                   valor_total                 data
+                   qtd_homologada              ano, mes, trimestre
 ```
 
 ## Exportar o dashboard real do Superset
-
 
 **Antes de recriar ou remover o container Superset que contem o dashboard**, execute na sua maquina:
 
@@ -146,13 +144,17 @@ nome_unid.         numero_item                 descricao_item
 
 O script exporta, verifica a presenca de dashboards e salva o ZIP real em superset/exports/arp-dashboard.zip, sem interromper o container. Revise o ZIP em busca de informacoes sensiveis **antes de publica-lo**. Uma vez incluido no repositorio, o bootstrap existente importa esse ZIP na inicializacao. Veja as instrucoes e riscos de persistencia em [superset/exports/README.md](superset/exports/README.md).
 
+**Modeling note:** the `FK` labels in the schematic describe logical references, not enforced database foreign-key constraints. `dim_tempo` is defined but is not populated by the current pipeline. The fact DAG reads `stage.arp_item` directly, without joins to dimensions. All financial totals describe values recorded in price-registration records, not amounts paid by public bodies.
+
 ## Start the Environment
+
+The collector no longer requires a root `.env` file just to start. Defaults for January 2026 are defined in `coletor/config.py`; to change the collection window, set `DATA_VIGENCIA_MIN` and `DATA_VIGENCIA_MAX` as Compose environment variables. The commands below start infrastructure, but **do not by themselves register Debezium, populate the fact or create a missing dashboard**.
 
 ```bash
 docker compose up -d
 ```
 
-Wait for all containers to become `healthy` (~2 min):
+Wait for long-running services to become `healthy` (time varies by machine):
 
 ```bash
 docker compose ps
@@ -193,43 +195,58 @@ docker exec arp_airflow_scheduler airflow dags trigger fato_registro_precos
 
 ## Project Structure
 
+The list below shows source and infrastructure files; local generated data, the uncommitted Superset dashboard export and Go dependency checksum file are not included.
+
+
 ```text
 .
+├── .github/workflows/           # Go and Python checks
+├── .gitattributes                # LF endings for *.sh on Windows
 ├── docker-compose.yml
-├── arp-connector.json          # Debezium connector configuration
-├── init-postgres/
-│   ├── 01_schema.sql           # Stage DDL (arp_ata, arp_item)
-│   └── 02_airflow_db.sql       # Airflow metadata database
-├── init-clickhouse/
-│   └── 01_schema.sql           # Dimension and fact DDL
-├── coletor/                    # Part 1 — Python RPA
-│   ├── main.py
-│   ├── api_client.py
-│   ├── transform.py
-│   ├── repository.py
+├── arp-connector.json            # Debezium CDC
+├── init-postgres/                # Stage and Airflow metadata DDL
+├── init-clickhouse/              # Dimension/fact DDL
+├── coletor/
+│   ├── main.py                   # Entry point
+│   ├── api_client.py             # HTTP client, pagination/retry
+│   ├── transform.py              # Data normalization
+│   ├── repository.py             # Conditional UPSERT/rollback
 │   ├── config.py
+│   ├── tests/test_pipeline.py
+│   ├── .env.example
 │   ├── requirements.txt
 │   └── Dockerfile
-├── worker/                     # Part 2 — Go Worker
-│   ├── main.go
+├── worker/
+│   ├── main.go                   # Worker entry point
 │   ├── go.mod
 │   ├── Dockerfile
 │   └── internal/
-│       ├── model/
-│       ├── config/
-│       ├── transform/
-│       ├── clickhouse/
-│       └── kafka/
-└── airflow/                    # Part 3 — Orchestration
-    ├── Dockerfile
-    ├── requirements.txt
-    └── dags/
-        └── dag_fato_registro_precos.py
+│       ├── model/model.go
+│       ├── config/config.go
+│       ├── transform/transform.go
+│       ├── clickhouse/clickhouse.go
+│       ├── kafka/kafka.go
+│       ├── kafka/dlq.go
+│       ├── processor/processor.go
+│       └── processor/processor_test.go
+├── airflow/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── dags/
+│   │   ├── dag_fato_registro_precos.py
+│   │   └── fato_transform.py
+│   └── tests/test_fato_transform.py
+├── scripts/
+│   ├── export_superset.sh
+│   ├── validate_superset_export.py
+│   └── tests/test_validate_superset_export.py
+└── superset/exports/README.md    # Export/import instructions (ZIP absent)
+
 ```
 
 ## CDC worker reliability (Go)
 
-The worker now uses **one ordered fetch/processing loop** and still writes
+The worker uses **one ordered fetch/processing loop** and still writes
 **batches** to ClickHouse. This deliberately trades parallel throughput for
 correct offset handling until partition-aware concurrency is implemented.
 
@@ -274,6 +291,8 @@ go mod tidy
 go test ./...
 ```
 
+**Go dependency lockfile:** `worker/go.sum` is not yet checked in. The build resolves modules during `go mod download`/`go mod tidy`. To commit the verified checksums, run `cd worker && go mod tidy && go test ./...` on a machine with network access, then commit `go.mod` and `go.sum`. Do not invent checksum entries.
+
 ## Known limitations and operational checks
 
 - **Collector is not a network-incremental crawler**: the documented Compras.gov.br
@@ -316,20 +335,4 @@ Run the tests:
 cd worker && go test ./...
 cd .. && python -m unittest discover -s coletor/tests -v
 python -m unittest discover -s airflow/tests -v
-```
-
-**Evidence from public PGE-related GitHub code:** 
-`devjuliomesquita/Desafio_Mais_Cond` separates Kafka listeners
-from application services, and
-`devjuliomesquita/seed-desafio-cdc` uses explicit transactions and
-propagates persistence errors. `Andressa-Evelyn/compras-gov-data-pipeline`
-implements a similar end-to-end pipeline. The DLQ protocol, atomic swap and
-safe Kafka commit rules in *this repository* are engineering adaptations,
-**not verified production implementations by those developers**.
-
-## Demo Video
-
-[Coming soon]
-
-```
 ```
