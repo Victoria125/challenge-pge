@@ -1,0 +1,2 @@
+# Preserve POSIX line endings for scripts checked out on Windows
+*.sh text eol=lf
