@@ -158,10 +158,11 @@ services:
   coletor:
     build: ./coletor
     container_name: arp_coletor
-    env_file:
-      - .env
     environment:
       DB_HOST: postgres
+      # Optional collector overrides can be set with Compose environment variables.
+      DATA_VIGENCIA_MIN: ${DATA_VIGENCIA_MIN:-2026-01-01}
+      DATA_VIGENCIA_MAX: ${DATA_VIGENCIA_MAX:-2026-01-31}
     depends_on:
       postgres:
         condition: service_healthy
@@ -286,8 +287,7 @@ services:
       bash -c "
         pip install -q clickhouse-connect &&
         superset db upgrade &&
-        superset fab create-admin --username admin --firstname Admin
-          --lastname User --email admin@superset.com --password admin 2>/dev/null || true &&
+        (superset fab create-admin --username admin --firstname Admin --lastname User --email admin@superset.com --password admin 2>/dev/null || true) &&
         superset init &&
         if [ -f /app/superset-import/arp-dashboard.zip ]; then
           superset import_dashboards --path /app/superset-import/arp-dashboard.zip --username admin;
