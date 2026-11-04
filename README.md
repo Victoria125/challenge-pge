@@ -138,7 +138,6 @@ nome_unid.         numero_item                 descricao_item
 ```
 
 ## Exportar o dashboard real do Superset
-Guia de apresentacao com funcao de cada arquivo: [docs/GUIA_APRESENTACAO_PGE.md](docs/GUIA_APRESENTACAO_PGE.md).
 
 
 **Antes de recriar ou remover o container Superset que contem o dashboard**, execute na sua maquina:
