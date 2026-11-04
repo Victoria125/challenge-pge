@@ -137,6 +137,14 @@ nome_unid.         numero_item                 descricao_item
                                                ano, mes, trimestre
 ```
 
+## Exportar o dashboard real do Superset
+
+**Antes de recriar ou remover o container Superset que contem o dashboard**, execute na sua maquina:
+
+    bash scripts/export_superset.sh
+
+O script exporta, verifica a presenca de dashboards e salva o ZIP real em superset/exports/arp-dashboard.zip, sem interromper o container. Revise o ZIP em busca de informacoes sensiveis **antes de publica-lo**. Uma vez incluido no repositorio, o bootstrap existente importa esse ZIP na inicializacao. Veja as instrucoes e riscos de persistencia em [superset/exports/README.md](superset/exports/README.md).
+
 ## Start the Environment
 
 ```bash
