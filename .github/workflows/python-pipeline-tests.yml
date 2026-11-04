@@ -5,6 +5,7 @@ on:
     paths:
       - "coletor/**"
       - "airflow/**"
+      - "scripts/**"
       - ".github/workflows/python-pipeline-tests.yml"
   push:
     branches: [main]
@@ -32,3 +33,7 @@ jobs:
         run: python -m unittest discover -s coletor/tests -v
       - name: Test fact validation
         run: python -m unittest discover -s airflow/tests -v
+      - name: Validate Superset export scripts
+        run: |
+          bash -n scripts/export_superset.sh
+          python -m unittest discover -s scripts/tests -v
