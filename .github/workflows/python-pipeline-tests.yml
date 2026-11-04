@@ -27,6 +27,18 @@ jobs:
         run: |
           cp coletor/.env.example .env
           docker compose config --quiet
+      - name: Guard against broken Superset admin command
+        run: |
+          docker compose config --format json > /tmp/compose-rendered.json
+          python - <<'PY'
+          import json
+          with open("/tmp/compose-rendered.json", encoding="utf-8") as f:
+              services = json.load(f)["services"]
+          cmd = services["superset"]["command"]
+          text = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+          assert "--firstname Admin --lastname User" in text, "Superset admin CLI split by newline"
+          assert "env_file" not in services["coletor"], "collector requires missing root .env"
+          PY
       - name: Compile Python scripts
         run: python -m compileall -q coletor airflow/dags
       - name: Test collector
